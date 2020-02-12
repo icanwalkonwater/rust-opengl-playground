@@ -1,9 +1,11 @@
 use gl::types::{GLchar, GLfloat, GLint, GLsizei, GLsizeiptr, GLuint};
 use glfw::{Action, Context, Key};
+use std::f32::consts::FRAC_PI_2;
 use std::ffi::CString;
+use std::io::Write;
 use std::os::raw::c_void;
 use std::sync::mpsc::Receiver;
-use std::{mem, ptr};
+use std::{io, mem, ptr};
 
 const WINDOW_RESOLUTION: (u32, u32) = (800, 600);
 
@@ -13,12 +15,13 @@ const FRAGMENT_SHADER_SOURCE: &str = include_str!("../shader.frag");
 fn main() {
     // Create a GLFW window and hook to OpenGL function pointers
     let (mut glfw, mut window, events) = init_and_create_glfw_window();
-    init_gl(&mut window);
 
     // Compile shaders
     let shader_program = unsafe { compiler_shader() };
     // Populate a VAO with a triangle
     let vao = unsafe { setup_vertex_data() };
+
+    let mut last_frame = glfw.get_time();
 
     // Render loop
     while !window.should_close() {
@@ -30,8 +33,25 @@ fn main() {
             gl::ClearColor(0.2, 0.3, 0.3, 1.0);
             gl::Clear(gl::COLOR_BUFFER_BIT);
 
-            // Draw triangle
+            // Configure shader
+            let time = glfw.get_time() as f32 * 5.0;
+            let red_value = (time.cos() / 2.0) + 0.5;
+            let green_value = (time.sin() / 2.0) + 0.5;
+            let blue_value = (time.cos() / 2.0 + FRAC_PI_2) + 0.5;
+            let vertex_color_location =
+                gl::GetUniformLocation(shader_program, CString::new("albedo").unwrap().as_ptr());
+
+            // Enable shader
             gl::UseProgram(shader_program);
+            // Send data to shader
+            gl::Uniform4f(
+                vertex_color_location,
+                red_value,
+                green_value,
+                blue_value,
+                1.0,
+            );
+
             gl::BindVertexArray(vao); // Not needed 'cause its the only VAO but that's how its supposed to work
             gl::DrawArrays(gl::TRIANGLES, 0, 3);
             // gl::BindVertexArray(0); // No need to unbind every time
@@ -40,16 +60,24 @@ fn main() {
         // GLFW stuff
         window.swap_buffers();
         glfw.poll_events();
+
+        print!("\rFPS: {}", 1.0 / (glfw.get_time() - last_frame));
+        last_frame = glfw.get_time();
+        io::stdout().flush().unwrap();
     }
 }
 
 fn init_and_create_glfw_window() -> (glfw::Glfw, glfw::Window, Receiver<(f64, glfw::WindowEvent)>) {
     // Initialize GLFW
     let mut glfw = glfw::init(glfw::FAIL_ON_ERRORS).unwrap();
+
+    // Configure OpenGL version to use
     glfw.window_hint(glfw::WindowHint::ContextVersion(3, 3));
     glfw.window_hint(glfw::WindowHint::OpenGlProfile(
         glfw::OpenGlProfileHint::Core,
     ));
+
+    // Force i3 to show it as a floating window
     glfw.window_hint(glfw::WindowHint::Resizable(false));
 
     #[cfg(target_os = "macos")]
@@ -64,15 +92,18 @@ fn init_and_create_glfw_window() -> (glfw::Glfw, glfw::Window, Receiver<(f64, gl
             glfw::WindowMode::Windowed,
         )
         .expect("Failed to create GLFW window !");
+
     window.make_current();
     window.set_key_polling(true);
     window.set_framebuffer_size_polling(true);
 
-    (glfw, window, events)
-}
+    // Cap the window at 60 FPS
+    glfw.set_swap_interval(glfw::SwapInterval::Sync(1));
 
-fn init_gl(window: &mut glfw::Window) {
+    // Initialize OpenGL functions
     gl::load_with(|s| window.get_proc_address(s) as *const _);
+
+    (glfw, window, events)
 }
 
 fn process_events(window: &mut glfw::Window, events: &Receiver<(f64, glfw::WindowEvent)>) {
@@ -164,32 +195,44 @@ unsafe fn check_linking_errors(shader_program: GLuint) {
 }
 
 unsafe fn setup_vertex_data() -> GLuint {
-    let vertices: [f32; 9] = [-0.5, -0.5, 0.0, 0.5, -0.5, 0.0, 0.0, 0.5, 0.0];
+    let vertices: [f32; 9] = [
+        -0.5, -0.5, 0.0, // bottom left
+        0.5, -0.5, 0.0, // bottom right
+        0.0, 0.5, 0.0, // up
+    ];
 
+    // Create a VAO and its VBO
     // VBO: Vertex Buffer Objects
     // VAO: Vertex Array Object
-    let (mut vbo, mut vao) = (0, 0);
-    gl::GenVertexArrays(1, &mut vao);
-    gl::GenBuffers(1, &mut vbo);
+    let (vbo, vao) = {
+        let (mut vbo, mut vao) = (0, 0);
+        gl::GenVertexArrays(1, &mut vao);
+        gl::GenBuffers(1, &mut vbo);
+
+        (vbo, vao)
+    };
 
     // Bind the VAO first, then bind the VBO and configure them
     gl::BindVertexArray(vao);
     gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+    // Send vertices to the GPU
     gl::BufferData(
         gl::ARRAY_BUFFER,
-        (vertices.len() * mem::size_of::<GLfloat>()) as GLsizeiptr,
+        (vertices.len() * mem::size_of_val(&vertices[0])) as GLsizeiptr,
         &vertices[0] as *const f32 as *const c_void,
         gl::STATIC_DRAW,
     );
 
+    // Describe an attribute of the vertex array
     gl::VertexAttribPointer(
-        0,
-        3,
-        gl::FLOAT,
-        gl::FALSE,
-        3 * mem::size_of::<GLfloat>() as GLsizei,
-        ptr::null(),
+        0, // Attribute 0
+        3, // with 3 values
+        gl::FLOAT, // of type float
+        gl::FALSE, // not normalized
+        3 * mem::size_of::<GLfloat>() as GLsizei, // stride: how many byte between vertices
+        ptr::null(), // offset to start at (in bytes)
     );
+    // Enable attribute 0, will be in the location instruction of the vertex shader
     gl::EnableVertexAttribArray(0);
 
     // VBO is associated with the VAO, we can safely unbind it
@@ -197,5 +240,8 @@ unsafe fn setup_vertex_data() -> GLuint {
     // Unbind VAO to avoid accidental modification of it even though its kinda hard to mess it up
     gl::BindVertexArray(0);
 
+    // gl::PolygonMode(gl::FRONT_AND_BACK, gl::LINE);
+
+    // The VBO is bound to the VAO so we only need to care of the VAO
     vao
 }
